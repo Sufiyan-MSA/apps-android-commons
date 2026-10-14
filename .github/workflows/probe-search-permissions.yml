@@ -1,0 +1,77 @@
+name: Probe search permissions
+
+# Temporary: compares what GET /search/issues returns to the GITHUB_TOKEN
+# with and without pull-requests: read. Deleted after one run.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  with-pull-requests-read:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const label = '[issues: write + pull-requests: read]';
+            const own = `repo:${context.repo.owner}/${context.repo.repo} is:pr author:${context.payload.pull_request.user.login}`;
+            const upstream = 'repo:commons-app/apps-android-commons is:pr is:merged author:Kota-Jagadeesh';
+            const search = async q => (await github.rest.search.issuesAndPullRequests({ q, per_page: 1 })).data;
+
+            // Wait until the new pull request is in the search index
+            let own_result;
+            let tries = 0;
+            for (; tries < 24; tries++) {
+              own_result = await search(own);
+              core.info(`try ${tries}: ${own} -> ${own_result.total_count}`);
+              if (own_result.total_count > 0) break;
+              await new Promise(resolve => setTimeout(resolve, 15000));
+            }
+            core.notice(`${label} SEARCH same-repo "${own}" => total_count=${own_result.total_count} incomplete=${own_result.incomplete_results} after ${tries + 1} tries`);
+
+            const upstream_result = await search(upstream);
+            core.notice(`${label} SEARCH upstream "${upstream}" => total_count=${upstream_result.total_count} incomplete=${upstream_result.incomplete_results}`);
+
+            try {
+              const pulls = await github.rest.pulls.list({ owner: context.repo.owner, repo: context.repo.repo, state: 'open' });
+              core.notice(`${label} REST pulls.list same-repo => ${pulls.data.length} open pull requests`);
+            } catch (error) {
+              core.notice(`${label} REST pulls.list same-repo => error ${error.status}: ${error.message}`);
+            }
+
+  issues-write-only:
+    needs: with-pull-requests-read
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const label = '[issues: write only]';
+            const own = `repo:${context.repo.owner}/${context.repo.repo} is:pr author:${context.payload.pull_request.user.login}`;
+            const upstream = 'repo:commons-app/apps-android-commons is:pr is:merged author:Kota-Jagadeesh';
+            const search = async q => (await github.rest.search.issuesAndPullRequests({ q, per_page: 1 })).data;
+
+            // The other job has already seen the pull request in the index
+            const counts = [];
+            for (let i = 0; i < 3; i++) {
+              const result = await search(own);
+              counts.push(`${result.total_count}${result.incomplete_results ? ' (incomplete)' : ''}`);
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            core.notice(`${label} SEARCH same-repo "${own}" => total_count per try: ${counts.join(', ')}`);
+
+            const upstream_result = await search(upstream);
+            core.notice(`${label} SEARCH upstream "${upstream}" => total_count=${upstream_result.total_count} incomplete=${upstream_result.incomplete_results}`);
+
+            try {
+              const pulls = await github.rest.pulls.list({ owner: context.repo.owner, repo: context.repo.repo, state: 'open' });
+              core.notice(`${label} REST pulls.list same-repo => ${pulls.data.length} open pull requests`);
+            } catch (error) {
+              core.notice(`${label} REST pulls.list same-repo => error ${error.status}: ${error.message}`);
+            }
